@@ -144,6 +144,12 @@ function compute_bgcell_to_inoutcut(cutgeo::DistributedEmbeddedDiscretization,ar
   end
 end
 
+function compute_bgfacet_to_inoutcut(cutgeo::DistributedEmbeddedDiscretization,args...)
+  map(local_views(cutgeo)) do cutgeo
+    compute_bgfacet_to_inoutcut(cutgeo,args...)
+  end
+end
+
 function remove_ghost_cells(trian::DistributedTriangulation)
   model = get_background_model(trian)
   gids = get_cell_gids(model)
@@ -219,6 +225,20 @@ function change_bgmodel(
   _consistent!(ls_to_bgcell_to_inoutcut,gids)
   DistributedEmbeddedDiscretization(cuts,model)
 end
+
+function change_bgmodel(
+  cutgeo::DistributedEmbeddedDiscretization{<:AbstractArray{<:EmbeddedFacetDiscretization}},
+  model::DistributedDiscreteModel,
+  args...)
+
+  D = map(num_dims,local_views(model)) |> PartitionedArrays.getany
+  cuts = _change_bgmodels(cutgeo,model,args...)
+  gids = get_face_gids(model,D-1)
+  ls_to_facet_to_inoutcut = map(c->c.ls_to_facet_to_inoutcut,cuts)
+  _consistent!(ls_to_facet_to_inoutcut,gids)
+  DistributedEmbeddedDiscretization(cuts,model)
+end
+
 
 function _change_bgmodels(
   cutgeo::DistributedEmbeddedDiscretization,
@@ -318,4 +338,57 @@ function remove_ghost_subfacets(cut::EmbeddedFacetDiscretization,facet_gids)
     ls_to_subfacet_to_inout,
     cut.oid_to_ls,
     cut.geo)
+end
+
+function compute_redistribute_wights(
+  cut::DistributedEmbeddedDiscretization,
+  args...)
+
+  geo = get_geometry(cut)
+  compute_redistribute_wights(cut,geo,args...)
+end
+
+function compute_redistribute_wights(
+  cut::DistributedEmbeddedDiscretization,
+  geo::CSG.Geometry,
+  args...)
+
+  compute_redistribute_wights(compute_bgcell_to_inoutcut(cut,geo),args...)
+end
+
+function compute_redistribute_wights(cell_to_inoutcut,in_or_out=IN)
+  map(cell_to_inoutcut) do cell_to_inoutcut
+    map(cell_to_inoutcut) do inoutcut
+      Int( inoutcut ∈ (CUT,in_or_out) )
+    end
+  end
+end
+
+function compute_adaptive_flags(
+  cut::DistributedEmbeddedDiscretization,
+  args...)
+
+  geo = get_geometry(cut)
+  compute_adaptive_flags(cut,geo,args...)
+end
+
+function compute_adaptive_flags(
+  cut::DistributedEmbeddedDiscretization,
+  geo::CSG.Geometry,
+  args...)
+
+  compute_adaptive_flags(compute_bgcell_to_inoutcut(cut,geo),args...)
+end
+
+function compute_adaptive_flags(cell_to_inoutcut)
+  map(cell_to_inoutcut) do c_to_ioc
+    flags = zeros(Cint,length(c_to_ioc))
+    flags .= nothing_flag
+    for (c,ioc) in enumerate(c_to_ioc)
+      if ioc == CUT
+        flags[c] = refine_flag
+      end
+    end
+    flags
+  end
 end
