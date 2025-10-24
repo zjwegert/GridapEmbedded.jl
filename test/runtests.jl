@@ -23,6 +23,8 @@ if QHULL_LOADED
 
   @time @testset "Distributed" begin include("DistributedTests/runtests.jl") end
 
+  @time @testset "Issues" begin include("IssuesTests/runtests.jl") end
+
   include(joinpath(@__DIR__,"..","examples","runexamples.jl"))
 
 else
