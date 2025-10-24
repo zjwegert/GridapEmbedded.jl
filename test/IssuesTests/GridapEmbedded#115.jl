@@ -1,3 +1,4 @@
+module GridapEmbeddedIssue115Tests
 using Gridap, GridapEmbedded
 using Gridap.Geometry, Gridap.Adaptivity
 using GridapEmbedded.LevelSetCutters
@@ -66,3 +67,4 @@ end
 # writevtk(Triangulation(cutgeo,"Ω2"),"results/Omega2")
 # writevtk(Triangulation(cutgeo,ACTIVE,"Ω2"),"results/Omega2_act")
 # writevtk(Λ_Ω2,"results/Omega2_ghost_skel")
+end
