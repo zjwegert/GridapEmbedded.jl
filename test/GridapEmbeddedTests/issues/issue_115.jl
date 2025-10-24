@@ -1,4 +1,3 @@
-module GridapEmbeddedIssue115Tests
 using Gridap, GridapEmbedded
 using Gridap.Geometry, Gridap.Adaptivity
 using GridapEmbedded.LevelSetCutters
@@ -63,8 +62,7 @@ for c in Λ_Ω2.minus.glue.face_to_cell
   @test c ∈ Ω2.a.subcells.cell_to_bgcell || c ∈ Ω2.b.tface_to_mface
 end
 
-# writevtk(Triangulation(model),"results/Omega")
-# writevtk(Triangulation(cutgeo,"Ω2"),"results/Omega2")
-# writevtk(Triangulation(cutgeo,ACTIVE,"Ω2"),"results/Omega2_act")
-# writevtk(Λ_Ω2,"results/Omega2_ghost_skel")
-end
+writevtk(Triangulation(model),"Omega")
+writevtk(Triangulation(cutgeo,"Ω2"),"Omega2")
+writevtk(Triangulation(cutgeo,ACTIVE,"Ω2"),"Omega2_act")
+writevtk(Λ_Ω2,"Omega2_ghost_skel")
