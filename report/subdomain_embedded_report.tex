@@ -1,0 +1,98 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=single,
+  rulecolor=\color{black!20},
+  backgroundcolor=\color{black!3},
+  breaklines=true
+}
+
+\title{Subdomain Embedded Methods and Automatic Shape Differentiation in \texttt{GridapEmbedded.jl}}
+\date{\today}
+\author{}
+
+\begin{document}
+\maketitle
+
+\section{Overview}
+We extended \texttt{GridapEmbedded.jl} to support unfitted (embedded) discretisations on a body-fitted subdomain triangulation $\Omega_\varphi \subset \Omega$ of a global background \texttt{DiscreteModel}, together with a complementary body-fitted region $\Omega_r = \Omega \setminus \Omega_\varphi$, while preserving full compatibility with \texttt{GridapEmbedded}'s automatic shape differentiation (\texttt{DifferentiableTriangulation}). The total physical domain is
+\[
+  \Omega_{\mathrm{phys}} = \Omega_{\varphi,\mathrm{phys}} \cup \Omega_r,
+  \qquad
+  \Omega_{\varphi,\mathrm{phys}} = \{x \in \Omega_\varphi : \varphi_h(x) < 0\},
+\]
+with finite element spaces $V_\varphi$ defined on $\Omega_\varphi$ and $V$ defined on the combined active triangulation $\Omega_{\mathrm{act}} = \Omega_{\varphi,\mathrm{act}} \cup \Omega_r$.
+
+\section{Key Design Decisions}
+
+\subsection{Global Background Model and the \texttt{UNDEF} State}
+All triangulations derived from \texttt{cut($\Omega_\varphi$, geo)} and \texttt{cut\_facets($\Omega_\varphi$, geo)} remain attached to the global background model \texttt{bgmodel = get\_background\_model($\Omega_\varphi$)}. Subcell and subfacet parent indices are mapped to global cell/facet indices of \texttt{bgmodel}, and \texttt{ls\_to\_bgcell\_to\_inoutcut} / \texttt{ls\_to\_facet\_to\_inoutcut} retain global length.
+
+Because existing states only distinguish \texttt{IN = -1}, \texttt{CUT = 0}, and \texttt{OUT = 1}, cells and facets outside $\Omega_\varphi$ are assigned a fourth sentinel \texttt{UNDEF = 2}:
+\begin{itemize}
+  \item Marking outside cells \texttt{OUT} would pollute \texttt{OUT}, \texttt{ACTIVE\_OUT}, \texttt{PHYSICAL\_OUT}, and CSG complements \texttt{!geo} with $\Omega_r$.
+  \item Marking them \texttt{IN} would pollute \texttt{IN}, \texttt{ACTIVE\_IN}, \texttt{PHYSICAL\_IN}, and \texttt{GhostSkeleton}.
+  \item Marking them \texttt{0} collides with \texttt{CUT}.
+\end{itemize}
+Preserving \texttt{UNDEF} across all CSG operations ($\cup, \cap, -, !$) automatically excludes cells/facets outside $\Omega_\varphi$ from all triangulation queries and restricts \texttt{GhostSkeleton(cutgeo)} strictly to interior facets of $\Omega_\varphi$, without altering the fields of \texttt{EmbeddedDiscretization} or \texttt{EmbeddedFacetDiscretization}.
+
+\subsection{Subdomain Restrictions and Facet Ordering}
+Both \texttt{cut($\Omega_\varphi$, geo)} and \texttt{cut\_facets($\Omega_\varphi$, geo)} enforce that $\Omega_\varphi$ is an injective body-fitted triangulation of the same cell dimension $D$ as \texttt{bgmodel}. To guarantee that cut subfacet reference coordinates (\texttt{point\_to\_rcoords}) match \texttt{bgmodel}'s facet orientation, the subdomain facet grid is constructed as \texttt{GridPortion(Grid(ReferenceFE\{D-1\}, bgmodel), tfacet\_to\_bgfacet)}. \texttt{GridView} triangulations are converted to \texttt{GridPortion} so node numbering aligns with first-order Lagrangian spaces on $\Omega_\varphi$, and full-model \texttt{DiscreteGeometry} inputs are automatically restricted to $\Omega_\varphi$ while preserving \texttt{oid\_to\_ls}.
+
+\subsection{Interface Gluing on $\Gamma_{\partial \Omega_r \cap \Omega_{\varphi,\mathrm{phys}}^c}$}
+On the void-exposed interface $\Gamma_{\partial \Omega_r \cap \Omega_{\varphi,\mathrm{phys}}^c} = \partial \Omega_r \cap \partial \Omega_\varphi \cap \{\varphi_h > 0\}$, cells $K_\varphi \in \Omega_\varphi$ adjacent to \texttt{OUT} facets are inactive ($K_\varphi \notin \Omega_{\mathrm{act}}$). Gluing this boundary to $\Omega_\varphi$ therefore causes FE basis functions $u, v \in V(\Omega_{\mathrm{act}})$ to evaluate to \texttt{VoidBasis} (zero) on \texttt{OUT} facets and evaluates $\nabla u$ from the wrong side on \texttt{CUT} facets.
+
+Instead, the interface is constructed from the $\Omega_r$ side of \texttt{Interface($\Omega_r$, $\Omega_\varphi$)}:
+\begin{lstlisting}
+cutfacet = cut_facets(Omega_phi, geo)
+Lambda = Interface(Omega_r, Omega_phi)
+Gamma_dOr = Boundary(Lambda.plus, cutfacet, PHYSICAL_OUT)
+\end{lstlisting}
+Here every facet in \texttt{Gamma\_dOr} is glued to $K_r \in \Omega_r \subset \Omega_{\mathrm{act}}$ and its normal already points outward from $\Omega_r$ into $\Omega_\varphi$. Default-\texttt{geo} overloads for \texttt{BoundaryTriangulation} / \texttt{SkeletonTriangulation} (and \texttt{CompositeTriangulation} inputs such as \texttt{Boundary($\Omega_r$)}) were added to support this cleanly.
+
+\subsection{Active Triangulation Union (\texttt{merge\_triangulations})}
+Because \texttt{AppendedTriangulation} sets \texttt{mface\_to\_tface = nothing}, it cannot host an $H^1$-conforming \texttt{FESpace}. We added and exported \texttt{merge\_triangulations(trians...)}, which forms a single injective \texttt{BodyFittedTriangulation} on \texttt{bgmodel} from the union of cell masks (preserving \texttt{FaceLabeling} boundary tags).
+
+\subsection{Automatic Shape Differentiation}
+\begin{itemize}
+  \item \textbf{Subdomain \texttt{SubCellTriangulation} / \texttt{SubFacetTriangulation}}: \texttt{extract\_dualized\_cell\_values} now evaluates $\varphi_h$ on \texttt{get\_triangulation($\varphi_h$)} ($\Omega_\varphi$) and extends nodal values to \texttt{bgmodel} via \texttt{sglue.mface\_to\_tface} (a zero-cost no-op for full-model spaces).
+  \item \textbf{\texttt{SubFacetBoundaryTriangulation} AD (2D \& 3D)}: Implemented full \texttt{DifferentiableTriangulation} support, including 1D \texttt{belongs\_to\_edge} for cut segments in 2D. For each cut background facet, \texttt{precompute\_autodiff\_caches} locates the adjacent cell $K_\varphi \in \Omega_\varphi$ (even when the facet is glued to $K_{\mathrm{eval}} = K_r \in \Omega_r$) and precomputes the facet vertex reference coordinates inside $K_\varphi$ via \texttt{OverlappingFaceToCellGlue} and \texttt{\_compute\_face\_to\_q\_vertex\_coords}. Dualized \texttt{get\_glue} composes the fixed \texttt{face\_ref\_map} (into $K_{\mathrm{eval}}$) with the dualized \texttt{subfacet\_to\_facet\_map}, while \texttt{\_compute\_cell\_ids} and \texttt{get\_cell\_fe\_data} route requests for \texttt{fe\_space} ($V_\varphi$) through $K_\varphi$ and all other spaces ($V$) through $K_{\mathrm{eval}}$.
+  \item \textbf{Normal vectors in AD}: Inside differentiated functionals, normals should be obtained from the differentiable triangulation (\texttt{get\_normal\_vector(diff\_Gamma)}, \texttt{get\_normal\_vector(diff\_Gamma\_dOr)}) so that both the normal (on $\Gamma$) and trace pullbacks use the dualized geometric maps.
+\end{itemize}
+
+\section{Summary of Code Changes}
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{@{}lp{9.8cm}@{}}
+\toprule
+\textbf{File} & \textbf{Changes} \\
+\midrule
+\texttt{src/Interfaces/Interfaces.jl} & Added internal \texttt{UNDEF = 2}; exported \texttt{merge\_triangulations}. \\
+\texttt{src/Interfaces/EmbeddedDiscretizations.jl} & Propagated \texttt{UNDEF} in CSG ops; handled empty second component in tuple \texttt{Triangulation}; added \texttt{merge\_triangulations}. \\
+\texttt{src/Interfaces/EmbeddedFacetDiscretizations.jl} & Added default-\texttt{geo}, \texttt{name}, and \texttt{CompositeTriangulation} overloads for \texttt{BoundaryTriangulation} / \texttt{SkeletonTriangulation}; handled empty second tuple component. \\
+\texttt{src/LevelSetCutters/DiscreteGeometries.jl} & Added \texttt{DiscreteGeometry} and \texttt{discretize} for \texttt{Triangulation} plus \texttt{GridView} handling. \\
+\texttt{src/LevelSetCutters/CutTriangulations.jl} & Added \texttt{\_adapt\_point\_values\_to\_grid} to restrict full-model \texttt{DiscreteGeometry} onto \texttt{GridPortion}. \\
+\texttt{src/LevelSetCutters/LevelSetCutters.jl} & Added subdomain \texttt{cut}, \texttt{cut\_facets}, \texttt{compute\_bgcell\_to\_inoutcut}, and \texttt{compute\_bgfacet\_to\_inoutcut}; updated \texttt{cut\_facets(::EmbeddedDiscretization, geo)}. \\
+\texttt{src/LevelSetCutters/DifferentiableTriangulations.jl} & Updated \texttt{extract\_dualized\_cell\_values} for subdomain $\varphi_h$; implemented full AD (gradient \& Hessian) for \texttt{SubFacetBoundaryTriangulation} and \texttt{DifferentiableAppendedTriangulation}. \\
+\texttt{src/Exports.jl} & Published \texttt{merge\_triangulations}. \\
+\texttt{test.jl} & Updated example script with corrected API and per-term + combined \texttt{FiniteDiff} AD verification. \\
+\texttt{test/LevelSetCuttersTests/SubdomainEmbeddedTests.jl} & Added 2D \& 3D tests for subdomain CutFEM, CSG, \texttt{GhostSkeleton}, \texttt{merge\_triangulations}, \texttt{FiniteDiff} gradients/Hessians, and MultiField AD (registered in \texttt{runtests.jl}). \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Verification}
+Verification covers: (i) volume/length conservation, CSG operations, dimension assertions, and strict interiority of \texttt{GhostSkeleton} on $\Omega_\varphi$; (ii) exact recovery of linear manufactured solutions ($L^2$ error $< 10^{-10}$) for 2D and 3D subdomain CutFEM Poisson problems; and (iii) per-term, combined, Hessian, and split MultiField AD checks against \texttt{FiniteDiff} on $\Omega_{\varphi,\mathrm{phys}}$, $\Gamma$, and $\Gamma_{\partial \Omega_r \cap \Omega_{\varphi,\mathrm{phys}}^c}$.
+
+\end{document}

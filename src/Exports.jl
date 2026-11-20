@@ -16,6 +16,7 @@ end
 @publish Interfaces EmbeddedDiscretization
 @publish Interfaces EmbeddedBoundary
 @publish Interfaces GhostSkeleton
+@publish Interfaces merge_triangulations
 @publish Interfaces IN
 @publish Interfaces OUT
 @publish Interfaces CUT_IN

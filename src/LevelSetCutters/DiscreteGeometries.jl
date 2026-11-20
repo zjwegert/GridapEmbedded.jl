@@ -33,8 +33,16 @@ function compatible_geometries(b::AnalyticalGeometry,a::DiscreteGeometry)
   discretize(b,a.point_to_coords), a
 end
 
+_get_subdomain_grid(trian::Triangulation) = _to_grid_portion(get_grid(trian))
+_to_grid_portion(grid::Grid) = grid
+_to_grid_portion(grid::Geometry.GridView) = GridPortion(grid.parent,grid.cell_to_parent_cell)
+
 function discretize(a::AnalyticalGeometry,model::DiscreteModel)
   discretize(a,get_grid(model))
+end
+
+function discretize(a::AnalyticalGeometry,trian::Triangulation)
+  discretize(a,_get_subdomain_grid(trian))
 end
 
 function discretize(a::AnalyticalGeometry,grid::Grid)
@@ -78,6 +86,11 @@ function DiscreteGeometry(f::Function,model::DiscreteModel;name::String="")
   discretize(geo,model)
 end
 
+function DiscreteGeometry(f::Function,trian::Triangulation;name::String="")
+  geo = AnalyticalGeometry(f;name=name)
+  discretize(geo,trian)
+end
+
 function DiscreteGeometry(
   point_to_value::AbstractVector,point_to_coords::AbstractVector;name::String="")
   data = (point_to_value,name,nothing)
@@ -95,5 +108,18 @@ function DiscreteGeometry(
   φh::CellField,model::DiscreteModel;name::String="")
   point_to_value = real(get_free_dof_values(φh))
   point_to_coords = collect1d(get_node_coordinates(model))
+  DiscreteGeometry(point_to_value,point_to_coords;name)
+end
+
+function DiscreteGeometry(
+  φh::CellField,trian::Triangulation;name::String="")
+  grid = _get_subdomain_grid(trian)
+  point_to_value = real(get_free_dof_values(φh))
+  point_to_coords = collect1d(get_node_coordinates(grid))
+  @check length(point_to_value) == length(point_to_coords) """
+  The number of free DOFs in φh ($(length(point_to_value))) does not match the number of
+  nodes in the triangulation ($(length(point_to_coords))).
+  Make sure φh is a 1st-order Lagrangian FEFunction defined on the given triangulation.
+  """
   DiscreteGeometry(point_to_value,point_to_coords;name)
 end

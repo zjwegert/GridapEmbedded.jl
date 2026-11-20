@@ -14,4 +14,6 @@ using Test
 
 @testset "GeometricalDifferentiation" begin include("GeometricalDifferentiationTests.jl") end
 
+@testset "SubdomainEmbedded" begin include("SubdomainEmbeddedTests.jl") end
+
 end # module

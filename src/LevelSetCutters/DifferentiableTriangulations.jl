@@ -34,6 +34,12 @@ mutable struct DifferentiableTriangulation{Dc,Dp,A,B} <: Triangulation{Dc,Dp}
   end
 end
 
+const EmbeddedTriangulationTypes = Union{
+  SubCellTriangulation,
+  SubFacetTriangulation,
+  SubFacetBoundaryTriangulation
+}
+
 # Constructors
 
 DifferentiableTriangulation(trian::Triangulation,fe_space) = trian
@@ -46,6 +52,14 @@ function DifferentiableTriangulation(
   return DifferentiableTriangulation(trian,fe_space,nothing,caches)
 end
 
+function DifferentiableTriangulation(
+  trian::SubFacetBoundaryTriangulation,
+  fe_space::FESpace
+)
+  caches = precompute_autodiff_caches(trian,fe_space)
+  return DifferentiableTriangulation(trian,fe_space,nothing,caches)
+end
+
 # Update cell values
 
 (t::DifferentiableTriangulation)(φh) = update_trian!(t,get_fe_space(φh),φh)
@@ -54,7 +68,7 @@ update_trian!(trian::Triangulation,U,φh) = trian
 
 function update_trian!(trian::DifferentiableTriangulation,space::FESpace,φh)
   (trian.fe_space !== space) && return trian
-  trian.cell_values = extract_dualized_cell_values(trian.trian,φh)
+  trian.cell_values = extract_dualized_cell_values(trian.trian,φh,trian.caches)
   return trian
 end
 
@@ -93,6 +107,16 @@ end
 
 function FESpaces._compute_cell_ids(uh,ttrian::DifferentiableTriangulation)
   FESpaces._compute_cell_ids(uh,ttrian.trian)
+end
+
+function FESpaces._compute_cell_ids(
+  uh,ttrian::DifferentiableTriangulation{Dc,Dp,<:SubFacetBoundaryTriangulation}
+) where {Dc,Dp}
+  if get_fe_space(uh) === ttrian.fe_space
+    return ttrian.caches.face_to_φscell
+  else
+    return FESpaces._compute_cell_ids(uh,ttrian.trian)
+  end
 end
 
 function Geometry.get_background_model(t::DifferentiableTriangulation)
@@ -156,6 +180,10 @@ function face_normal(face_coords::Vector{<:Point{3}})
   LevelSetCutters._normal_vector(p2-p1,p3-p1)
 end
 
+function Geometry.get_facet_normal(ttrian::DifferentiableTriangulation)
+  get_facet_normal(ttrian.trian)
+end
+
 function Geometry.get_facet_normal(
   ttrian::DifferentiableTriangulation{Dc,Dp,<:SubFacetTriangulation}
 ) where {Dc,Dp}
@@ -195,15 +223,53 @@ function Geometry.get_glue(ttrian::DifferentiableTriangulation,val::Val{D}) wher
   )
 end
 
+function Geometry.get_glue(
+  ttrian::DifferentiableTriangulation{Dc,Dp,<:SubFacetBoundaryTriangulation},
+  val::Val{D}
+) where {Dc,Dp,D}
+  glue = get_glue(ttrian.trian,val)
+  if isnothing(glue) || isnothing(ttrian.cell_values) || isempty(ttrian.cell_values)
+    return glue
+  end
+
+  c = ttrian.caches
+  cell_values = ttrian.cell_values
+  cell_to_rcoords = lazy_map(
+    DualizeCoordsMap(),c.face_to_rcoords,c.face_to_bgrcoords,
+    cell_values,c.face_to_edges,c.face_to_edge_lists
+  )
+  cell_reffe = get_cell_reffe(ttrian)
+  subfacet_to_facet_map = compute_cell_maps(cell_to_rcoords,cell_reffe)
+
+  if D == Dc
+    return FaceToFaceGlue(
+      glue.tface_to_mface,
+      subfacet_to_facet_map,
+      glue.mface_to_tface,
+    )
+  elseif D - 1 == Dc
+    fglue = get_glue(ttrian.trian.facets,val)
+    face_ref_map = lazy_map(Reindex(fglue.tface_to_mface_map),ttrian.trian.subfacet_to_facet)
+    cell_ref_map = lazy_map(∘,face_ref_map,subfacet_to_facet_map)
+    return FaceToFaceGlue(
+      glue.tface_to_mface,
+      cell_ref_map,
+      glue.mface_to_tface,
+    )
+  else
+    return nothing
+  end
+end
+
 function Geometry.is_change_possible(
   strian::A,ttrian::DifferentiableTriangulation{Dc,Dp,A}
-) where {Dc,Dp,A <: Union{SubCellTriangulation,SubFacetTriangulation}}
+) where {Dc,Dp,A <: EmbeddedTriangulationTypes}
   return strian === ttrian.trian
 end
 
 function Geometry.best_target(
   strian::A,ttrian::DifferentiableTriangulation{Dc,Dp,A}
-) where {Dc,Dp,A <: Union{SubCellTriangulation,SubFacetTriangulation}}
+) where {Dc,Dp,A <: EmbeddedTriangulationTypes}
   return ttrian
 end
 
@@ -212,7 +278,7 @@ for tdomain in (:ReferenceDomain,:PhysicalDomain)
     @eval begin
       function CellData.change_domain(
         a::CellField,strian::A,::$sdomain,ttrian::DifferentiableTriangulation{Dc,Dp,A},::$tdomain
-      ) where {Dc,Dp,A <: Union{SubCellTriangulation,SubFacetTriangulation}}
+      ) where {Dc,Dp,A <: EmbeddedTriangulationTypes}
         @assert is_change_possible(strian,ttrian)
         b = change_domain(a,$(tdomain)())
         return CellData.similar_cell_field(a,CellData.get_data(b),ttrian,$(tdomain)())
@@ -223,6 +289,17 @@ end
 
 function FESpaces.get_cell_fe_data(fun,f,ttrian::DifferentiableTriangulation)
   FESpaces.get_cell_fe_data(fun,f,ttrian.trian)
+end
+
+function FESpaces.get_cell_fe_data(
+  fun,f,ttrian::DifferentiableTriangulation{Dc,Dp,<:SubFacetBoundaryTriangulation}
+) where {Dc,Dp}
+  if f === ttrian.fe_space || (isa(f,FEFunction) && get_fe_space(f) === ttrian.fe_space)
+    sface_to_data = fun(f)
+    return lazy_map(Reindex(sface_to_data),ttrian.caches.face_to_φscell)
+  else
+    return FESpaces.get_cell_fe_data(fun,f,ttrian.trian)
+  end
 end
 
 function compute_cell_maps(cell_coords,cell_reffes)
@@ -316,6 +393,15 @@ function get_edge_list(poly::Polytope)
 end
 
 function belongs_to_edge(
+  p::Point{1,T},edge::Vector{<:Integer},bgpts::Vector{Point{1,T}}
+) where {T}
+  tol = 10*eps(T)
+  p1, p2 = bgpts[edge]
+  a, b = minmax(p1[1],p2[1])
+  return (a - tol <= p[1] <= b + tol)
+end
+
+function belongs_to_edge(
   p::Point{D,T},edge::Vector{<:Integer},bgpts::Vector{Point{D,T}}
 ) where {D,T}
   tol = 10*eps(T)
@@ -359,6 +445,63 @@ function precompute_autodiff_caches(
   return cache
 end
 
+function precompute_autodiff_caches(
+  trian::SubFacetBoundaryTriangulation{Dc,Dp},
+  fe_space::FESpace
+) where {Dc,Dp}
+  bgmodel = get_background_model(trian)
+  subfacets = trian.subfacets
+
+  bgfacet_grid = Grid(ReferenceFE{Dc},bgmodel)
+  caches = precompute_autodiff_caches(
+    bgfacet_grid,
+    subfacets.cell_to_bgcell,
+    subfacets.cell_to_points,
+    subfacets.point_to_rcoords,
+    subfacets.point_to_coords,
+  )
+
+  # Find the adjacent cell K_φ ∈ get_triangulation(fe_space) for each cut background facet
+  D = num_cell_dims(bgmodel)
+  φtrian = get_triangulation(fe_space)
+  @check get_background_model(φtrian) === bgmodel
+  φglue = get_glue(φtrian,Val(D))
+  @check isa(φglue,FaceToFaceGlue) && !isnothing(φglue.mface_to_tface)
+  bgcell_to_φcell = φglue.mface_to_tface
+
+  topo = get_grid_topology(bgmodel)
+  facet_to_cells = Table(get_faces(topo,Dc,D))
+  bgfacets = subfacets.cell_to_bgcell
+  n_subfacets = length(bgfacets)
+  face_to_φbgcell = Vector{Int32}(undef,n_subfacets)
+  face_to_φscell = Vector{Int32}(undef,n_subfacets)
+  face_to_φlcell = Vector{Int8}(undef,n_subfacets)
+  for sf in 1:n_subfacets
+    bgfacet = bgfacets[sf]
+    cells = view(facet_to_cells,bgfacet)
+    eval_cell = trian.cell_ids[sf]
+    idx = findfirst(c -> c == eval_cell && bgcell_to_φcell[c] > 0, cells)
+    if isnothing(idx)
+      idx = findfirst(c -> bgcell_to_φcell[c] > 0, cells)
+    end
+    @check !isnothing(idx) """
+    Cut background facet $bgfacet has no adjacent cell belonging to the level-set FESpace triangulation.
+    """
+    φbgcell = cells[idx]
+    face_to_φbgcell[sf] = φbgcell
+    face_to_φscell[sf] = Int32(bgcell_to_φcell[φbgcell])
+    face_to_φlcell[sf] = Int8(idx)
+  end
+
+  cell_grid = get_grid(bgmodel)
+  φ_face_grid = view(bgfacet_grid,bgfacets)
+  φ_glue = Geometry.OverlappingFaceToCellGlue(topo,cell_grid,φ_face_grid,bgfacets,face_to_φlcell)
+  face_to_φrcoords = collect(Geometry._compute_face_to_q_vertex_coords(cell_grid,φ_face_grid,φ_glue))
+
+  cache = (; caches..., face_to_φbgcell, face_to_φscell, face_to_φrcoords)
+  return cache
+end
+
 orient(n,fcoords) = round(Int8,dot(n,face_normal(fcoords)))
 Arrays.return_value(::typeof(orient),n,face_coords) = zero(Int8)
 
@@ -394,6 +537,8 @@ function precompute_autodiff_caches(
   return cache
 end
 
+extract_dualized_cell_values(trian,φh,caches) = extract_dualized_cell_values(trian,φh)
+
 function extract_dualized_cell_values(
   trian::SubCellTriangulation,
   φh::CellField,
@@ -423,17 +568,36 @@ function extract_dualized_cell_values(
 end
 
 function extract_dualized_cell_values(
+  trian::SubFacetBoundaryTriangulation,
+  φh::CellField,
+  caches,
+)
+  @assert isa(DomainStyle(φh),ReferenceDomain)
+  scell_to_fields = CellData.get_data(φh)
+  face_to_fields = lazy_map(Reindex(scell_to_fields),caches.face_to_φscell)
+  face_to_values = lazy_map(evaluate,face_to_fields,caches.face_to_φrcoords)
+  # When φh has complex-valued DOFs, we define the geometry using the real part.
+  face_to_rvalues = lazy_map(real,face_to_values)
+  return face_to_rvalues
+end
+
+function extract_dualized_cell_values(
   bgmodel::DiscreteModel,
   φh::CellField,
 )
   @assert isa(DomainStyle(φh),ReferenceDomain)
-  bg_ctypes = get_cell_type(bgmodel)
-  bgcell_to_polys = expand_cell_data(get_polytopes(bgmodel),bg_ctypes)
-  bgcell_to_rcoords = lazy_map(get_vertex_coordinates,bgcell_to_polys)
-  bgcell_to_fields = CellData.get_data(φh)
-  bgcell_to_values = lazy_map(evaluate,bgcell_to_fields,bgcell_to_rcoords)
+  strian = get_triangulation(φh)
+  @check get_background_model(strian) === bgmodel
+  D = num_cell_dims(bgmodel)
+  s_ctypes = get_cell_type(strian)
+  scell_to_polys = expand_cell_data(get_polytopes(strian),s_ctypes)
+  scell_to_rcoords = lazy_map(get_vertex_coordinates,scell_to_polys)
+  scell_to_fields = CellData.get_data(φh)
+  scell_to_values = lazy_map(evaluate,scell_to_fields,scell_to_rcoords)
   # When φh has complex-valued DOFs, we define the geometry using the real part.
-  bgcell_to_rvalues = lazy_map(real,bgcell_to_values)
+  scell_to_rvalues = lazy_map(real,scell_to_values)
+  sglue = get_glue(strian,Val(D))
+  bgcell_to_rvalues = extend(scell_to_rvalues,sglue.mface_to_tface)
   return bgcell_to_rvalues
 end
 
@@ -454,6 +618,11 @@ end
 function update_trian!(trian::Geometry.TriangulationView,U,φh)
   update_trian!(trian.parent,U,φh)
   return trian
+end
+
+function FESpaces.get_cell_fe_data(fun,f,ttrian::DifferentiableTriangulationView)
+  data = FESpaces.get_cell_fe_data(fun,f,ttrian.parent)
+  lazy_map(Reindex(data),ttrian.cell_to_parent_cell)
 end
 
 function FESpaces._change_argument(
@@ -494,6 +663,40 @@ function update_trian!(trian::DifferentiableAppendedTriangulation,U,φh)
   update_trian!(trian.a,U,φh)
   update_trian!(trian.b,U,φh)
   return trian
+end
+
+function Geometry.is_change_possible(
+  strian::AppendedTriangulation{Dc,Dp},
+  ttrian::DifferentiableAppendedTriangulation{Dc,Dp}
+) where {Dc,Dp}
+  return is_change_possible(strian.a,ttrian.a) && (strian.b === ttrian.b || is_change_possible(strian.b,ttrian.b))
+end
+
+function Geometry.best_target(
+  strian::AppendedTriangulation{Dc,Dp},
+  ttrian::DifferentiableAppendedTriangulation{Dc,Dp}
+) where {Dc,Dp}
+  return ttrian
+end
+
+for tdomain in (:ReferenceDomain,:PhysicalDomain)
+  for sdomain in (:ReferenceDomain,:PhysicalDomain)
+    @eval begin
+      function CellData.change_domain(
+        a::CellField,strian::AppendedTriangulation{Dc,Dp},::$sdomain,ttrian::DifferentiableAppendedTriangulation{Dc,Dp},::$tdomain
+      ) where {Dc,Dp}
+        @assert is_change_possible(strian,ttrian)
+        b = change_domain(a,$(tdomain)())
+        return CellData.similar_cell_field(a,CellData.get_data(b),ttrian,$(tdomain)())
+      end
+    end
+  end
+end
+
+function FESpaces.get_cell_fe_data(fun,f,ttrian::DifferentiableAppendedTriangulation)
+  data_a = FESpaces.get_cell_fe_data(fun,f,ttrian.a)
+  data_b = FESpaces.get_cell_fe_data(fun,f,ttrian.b)
+  lazy_append(data_a,data_b)
 end
 
 function FESpaces._change_argument(

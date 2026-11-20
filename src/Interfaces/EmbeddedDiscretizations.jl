@@ -134,6 +134,9 @@ function compute_inoutcut(a::UnaryNode)
 end
 
 function _compute_inoutcut_union(inout_1,inout_2)
+  if (inout_1==UNDEF) || (inout_2==UNDEF)
+    return Int8(UNDEF)
+  end
   inout_12 = (inout_1,inout_2)
   if (inout_1==OUT) && (inout_2==OUT)
     Int8(OUT)
@@ -145,6 +148,9 @@ function _compute_inoutcut_union(inout_1,inout_2)
 end
 
 function _compute_inoutcut_intersection(inout_1,inout_2)
+  if (inout_1==UNDEF) || (inout_2==UNDEF)
+    return Int8(UNDEF)
+  end
   inout_12 = (inout_1,inout_2)
   if (inout_1==IN) && (inout_2==IN)
     Int8(IN)
@@ -156,6 +162,9 @@ function _compute_inoutcut_intersection(inout_1,inout_2)
 end
 
 function _compute_inoutcut_setdiff(inout_1,inout_2)
+  if (inout_1==UNDEF) || (inout_2==UNDEF)
+    return Int8(UNDEF)
+  end
   inout_12 = (inout_1,inout_2)
   if (inout_1==IN) && (inout_2==OUT)
     Int8(IN)
@@ -167,7 +176,9 @@ function _compute_inoutcut_setdiff(inout_1,inout_2)
 end
 
 function _compute_inoutcut_complementary(inout_1)
-  if (inout_1==OUT)
+  if (inout_1==UNDEF)
+    Int8(UNDEF)
+  elseif (inout_1==OUT)
     Int8(IN)
   elseif (inout_1==IN)
     Int8(OUT)
@@ -297,7 +308,13 @@ end
 function Triangulation(cut::EmbeddedDiscretization,in_or_out::Tuple,geo::CSG.Geometry)
   trian1 = Triangulation(cut,in_or_out[1],geo)
   trian2 = Triangulation(cut,in_or_out[2],geo)
-  num_cells(trian1) == 0 ? trian2 : lazy_append(trian1,trian2)
+  if num_cells(trian1) == 0
+    trian2
+  elseif num_cells(trian2) == 0
+    trian1
+  else
+    lazy_append(trian1,trian2)
+  end
 end
 
 function Triangulation(cut::EmbeddedDiscretization,in_or_out::CutInOrOut,geo::CSG.Geometry)
@@ -569,4 +586,30 @@ function _fill_ghost_skeleton_mask!(
       facet_to_mask[facet] = true
     end
   end
+end
+
+"""
+    merge_triangulations(trians::Triangulation{D}...) where D
+
+Creates a `BodyFittedTriangulation` representing the union of cells/faces of the
+given body-fitted triangulations sharing the same background `DiscreteModel`.
+Useful for constructing a combined active triangulation (e.g., merging `Ω_φ_act`
+and `Ω_r`) on which an H1-conforming `FESpace` can be defined.
+"""
+function merge_triangulations(trian1::Triangulation{D}, trians::Triangulation{D}...) where D
+  all_trians = (trian1, trians...)
+  bgmodel = get_background_model(trian1)
+  @check all(t -> get_background_model(t) === bgmodel, trians) """
+  All triangulations must share the same background DiscreteModel.
+  """
+  n_mfaces = num_faces(bgmodel, D)
+  mask = fill(false, n_mfaces)
+  for t in all_trians
+    glue = get_glue(t, Val(D))
+    @check isa(glue, FaceToFaceGlue) """
+    All triangulations passed to `merge_triangulations` must have a `FaceToFaceGlue` of dimension $D.
+    """
+    mask[glue.tface_to_mface] .= true
+  end
+  return Triangulation(ReferenceFE{D}, bgmodel, mask)
 end
